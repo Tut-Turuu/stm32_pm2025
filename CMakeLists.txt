@@ -4,8 +4,11 @@ cmake_minimum_required(VERSION 3.0)
 # Otherwise it will fall with `reference to _exit() not found` error
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_CXX_COMPILER_WORKS 1)
+set(CMAKE_CXX_COMPILER /usr/bin/arm-none-eabi-gcc)
 
 project(stm32_template)
+
+
 
 set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS)
 set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS)
