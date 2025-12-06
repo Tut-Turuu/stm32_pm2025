@@ -1,111 +1,118 @@
 #include <stdint.h>
+#include "stm32/stm32f10x.h"
 
+typedef struct {
+    GPIO_TypeDef* port;
+    uint32_t pin;
+} PinConfig;
 
+static const PinConfig STATUS_LED = {GPIOC, 13};
+static const PinConfig UP_BUTTON = {GPIOA, 0};
+static const PinConfig DOWN_BUTTON = {GPIOA, 1};
 
-#define RCC_APB2ENR   (*(volatile uint32_t*)0x40021018)
-#define GPIOA_CRL     (*(volatile uint32_t*)0x40010800)
-#define GPIOA_ODR     (*(volatile uint32_t*)0x4001080C)
-#define SPI1_CR1      (*(volatile uint32_t*)0x40013000)
-#define SPI1_SR       (*(volatile uint32_t*)0x40013008)
-#define SPI1_DR       (*(volatile uint32_t*)0x4001300C)
+typedef struct {
+    uint16_t divider;
+    uint16_t reload_value;
+} TimerConfig;
 
-#define CS_PIN   4
-#define DC_PIN   1
-#define RES_PIN  0
+static TimerConfig blink_timer = {7200, 10000};
 
-#define RCC_APB2ENR_SPI1EN    (1 << 12)
-#define RCC_APB2ENR_IOPAEN    (1 << 2)
+typedef struct {
+    uint8_t up_previous;
+    uint8_t down_previous;
+} ButtonState;
 
-#define SPI_CR1_CPHA          (1 << 0)
-#define SPI_CR1_CPOL          (1 << 1)
-#define SPI_CR1_MSTR          (1 << 2)
-#define SPI_CR1_BR_2          (1 << 5)
-#define SPI_CR1_SSI           (1 << 8)
-#define SPI_CR1_SSM           (1 << 9)
-#define SPI_CR1_SPE           (1 << 6)
+static ButtonState button_status = {1, 1};
 
-#define SPI_SR_TXE            (1 << 1)
-#define SPI_SR_RXNE           (1 << 0)
-
-
-void delay(uint32_t count) {
-    for(volatile uint32_t i = 0; i < count; i++);
-}
-
-void SPI1_Init(void) {
-    RCC_APB2ENR |= RCC_APB2ENR_SPI1EN | RCC_APB2ENR_IOPAEN;
+static void setup_gpio(void) {
+    RCC->APB2ENR |= (RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN | RCC_APB2ENR_AFIOEN);
     
-    GPIOA_CRL |= (1 << 0) | (1 << 4) | (1 << 16);
-    GPIOA_CRL |= (0xB << 20) | (0xB << 28);
+    STATUS_LED.port->CRH = (STATUS_LED.port->CRH & ~(GPIO_CRH_MODE13 | GPIO_CRH_CNF13)) 
+                          | GPIO_CRH_MODE13_0;
+    STATUS_LED.port->BSRR = (1U << STATUS_LED.pin);
     
-    SPI1_CR1 |= SPI_CR1_CPHA | SPI_CR1_CPOL | SPI_CR1_MSTR | 
-                SPI_CR1_BR_2 | SPI_CR1_SSI | SPI_CR1_SSM | SPI_CR1_SPE;
+    uint32_t temp = UP_BUTTON.port->CRL;
+    temp &= ~(GPIO_CRL_MODE0 | GPIO_CRL_CNF0 | GPIO_CRL_MODE1 | GPIO_CRL_CNF1);
+    temp |= (GPIO_CRL_CNF0_1 | GPIO_CRL_CNF1_1);
+    UP_BUTTON.port->CRL = temp;
     
-    GPIOA_ODR |= (1 << CS_PIN) | (1 << RES_PIN);
+    UP_BUTTON.port->ODR |= (1U << UP_BUTTON.pin) | (1U << DOWN_BUTTON.pin);
 }
 
-void SPI1_Write(uint8_t data) {
-    while(!(SPI1_SR & SPI_SR_TXE));
-    SPI1_DR = data;
+static void apply_timer_settings(uint16_t divider) {
+    TIM2->PSC = divider;
+    TIM2->EGR = TIM_EGR_UG;
 }
 
-uint8_t SPI1_Read(void) {
-    SPI1_DR = 0xFF;
-    while(!(SPI1_SR & SPI_SR_RXNE));
-    return SPI1_DR;
-}
-
-void display_cmd(uint8_t cmd) {
-    GPIOA_ODR &= ~(1 << CS_PIN);
-    GPIOA_ODR &= ~(1 << DC_PIN);
-    SPI1_Write(cmd);
-    GPIOA_ODR |= (1 << CS_PIN);
-}
-
-void display_data(uint8_t data) {
-    GPIOA_ODR &= ~(1 << CS_PIN);
-    GPIOA_ODR |= (1 << DC_PIN);
-    SPI1_Write(data);
-    GPIOA_ODR |= (1 << CS_PIN);
-}
-
-void display_init(void) {
-    GPIOA_ODR &= ~(1 << RES_PIN);
-    delay(10000);
-    GPIOA_ODR |= (1 << RES_PIN);
-    delay(10000);
+static void configure_timer(uint16_t divider, uint16_t reload) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
     
-    display_cmd(0xAE);
-    display_cmd(0x20); 
-    display_cmd(0x00);
-    display_cmd(0x21); 
-    display_cmd(0x00); 
-    display_cmd(0x7F);
-    display_cmd(0x22); 
-    display_cmd(0x00); 
-    display_cmd(0x07);
-    display_cmd(0x8D); 
-    display_cmd(0x14);
-    display_cmd(0xAF);
+    apply_timer_settings(divider);
+    TIM2->ARR = reload;
+    
+    TIM2->DIER |= TIM_DIER_UIE;
+    
+    NVIC->ISER[0] |= (1 << 28); // TIM2_IRQn = 28
+    
+
+    TIM2->CR1 |= TIM_CR1_CEN;
 }
 
-void display_stripes(void) {
-    for(uint8_t page = 0; page < 8; page++) {
-        display_cmd(0xB0 + page);
-        display_cmd(0x00);
-        display_cmd(0x10);
-        
-        for(uint8_t col = 0; col < 128; col++) {
-            display_data(0b10100010);
-        }
+void TIM2_IRQHandler(void) {
+    if (TIM2->SR & TIM_SR_UIF) {
+        TIM2->SR &= ~TIM_SR_UIF;
+        STATUS_LED.port->ODR ^= (1U << STATUS_LED.pin);
     }
 }
 
-int main(void) {
-    SPI1_Init();
-    display_init();
-    display_stripes();
+static uint8_t is_button_active(const PinConfig* button) {
+    return (button->port->IDR & (1U << button->pin)) == 0;
+}
+
+static void process_button_events(void) {
+    uint8_t up_current = is_button_active(&UP_BUTTON);
+    uint8_t down_current = is_button_active(&DOWN_BUTTON);
     
-    while(1) {
+    if (up_current && !button_status.up_previous) {
+        uint16_t new_divider;
+        
+        if (blink_timer.divider < 32768) {
+            new_divider = blink_timer.divider * 2;
+        } else {
+            new_divider = 65535;
+        }
+        
+        if (new_divider != blink_timer.divider) {
+            blink_timer.divider = new_divider;
+            apply_timer_settings(blink_timer.divider);
+        }
+    }
+    
+    if (down_current && !button_status.down_previous) {
+        uint16_t new_divider;
+        
+        if (blink_timer.divider > 2) {
+            new_divider = blink_timer.divider / 2;
+        } else {
+            new_divider = 1;
+        }
+        
+        if (new_divider != blink_timer.divider) {
+            blink_timer.divider = new_divider;
+            apply_timer_settings(blink_timer.divider);
+        }
+    }
+    
+    button_status.up_previous = up_current;
+    button_status.down_previous = down_current;
+}
+
+int main(void) {
+    setup_gpio();
+    configure_timer(blink_timer.divider - 1, blink_timer.reload_value - 1);
+    
+    // Основной цикл программы
+    while (1) {
+        process_button_events();
     }
 }
